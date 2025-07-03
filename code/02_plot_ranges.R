@@ -1,178 +1,218 @@
-# world map to use for range plots
-world2 <- ggplot2::map_data("world2", wrap = c(40, 400)) %>%
-  dplyr::filter(region %in% c("Russia", "USA", "Canada"))
+# sp <- "Sebastolobus macrochir"
 
-# sp <- "Myoxocephalus polyacanthocephalus"
+# # data frame of species to create range maps for
+# g <- catch %>%
+#   #filter(species_name %in% sp) %>%
+#   filter(grepl(sp, species_name)) %>%
+#   dplyr::mutate(lon = ifelse(lon < 0, 360 + lon, lon)) %>%
+#   ungroup() %>%
+#   tidyr::nest()
 
-# data frame of species to create range maps for
-g <- catch %>%
-  dplyr::filter(species_code <= 31550) %>% # only fish for now
- # filter(species_name == sp) %>%
+
+# prepping dataset for plotting
+g <- guide_species %>%
+  #  filter(species == "Lebbeus groenlandicus") %>%
+  filter(tax_group == "shrimp") %>%
+  dplyr::select(phylum:species_code) %>%
+  dplyr::left_join(catch, by = "species_code") %>%
+  dplyr::select(
+    species_name = species, species_code,
+    tax_group, lat, lon, region
+  ) %>%
   dplyr::mutate(lon = ifelse(lon < 0, 360 + lon, lon)) %>%
+  dplyr::filter(!is.na(lat) & !is.na(lon)) %>%
+  unique() %>%
+  group_by(species_code) %>%
   tidyr::nest()
 
 
 # looping over each species to create plot
 for (i in 1:nrow(g)) {
-  # print(g$data[[i]]$species_name[[1]])
-  # removing outlier points based on clustering algorithm
-  gg <- remove_outliers(g$data[[i]])
+ # print(g$data[[i]]$species_name[1])
 
+  # removing outlier points based on clustering algorithm
+  gg <- remove_outliers(g$data[[i]]) %>%
+    dplyr::mutate(region = get_region(.))
+
+  # sample down the number of points so distribution isn't as biased towards densly sampled regions
+  if (nrow(gg) > 5000) {
+    gg <- gg %>%
+      sample_n(3000, replace = FALSE)
+  }
 
   # idigbio records of complete range
   idig <- idig_search_records(rq = list(scientificname = gg$species_name[[1]])) %>%
     tibble::as_tibble() %>%
-    dplyr::mutate(year = as.numeric(str_extract(datecollected, "^[0-9]{4}"))) %>%
-   # dplyr::filter(year > 2000) %>% # only newer records
-    dplyr::mutate(lon = round(geopoint.lon, 2), 
-                  lat = round(geopoint.lat, 2)) %>%
+    janitor::clean_names() %>%
+    dplyr::mutate(year = as.numeric(data_dwc_year)) %>%
+    dplyr::filter(year > 1900) %>% # only newer records
+    dplyr::mutate(
+      lon = round(geopoint_lon, 2),
+      lat = round(geopoint_lat, 2)
+    ) %>%
     dplyr::select(lon, lat) %>%
     dplyr::filter(complete.cases(.)) %>%
     unique() %>%
     dplyr::mutate(lon = ifelse(lon < 0, 360 + lon, lon)) %>%
     dplyr::filter(lat < 70 & lat > 50 & lon > 170 & lon < 230) # fitting points to plot
-    
-idig <- remove_outliers(idig)
 
-  # Find idig polygon
-  if (!is.na(idig) && nrow(idig) > 1) {
-    f <- 20 # scaling factor so contours close properly
-    kk2 <- MASS::kde2d(idig$lon, idig$lat,
-      lims = c(
-        c(min(idig$lon) - f, max(idig$lon) + f),
-        c(min(idig$lat) - f, max(idig$lat) + f)
-      )
-    )
-    dimnames(kk2$z) <- list(kk2$x, kk2$y)
-    dc2 <- reshape::melt(kk2$z)
-    h <- getLevel(idig$lon, idig$lat, 0.99)
-  } else {
-    idig <- h <- dc2 <- kk2 <- NA
-  }
+  
+  idig <- remove_outliers(idig) %>%
+    dplyr::mutate(region = get_region(.)) %>%
+    dplyr::filter(!is.na(region)) %>%
+    dplyr::group_by(region) %>%
+    dplyr::filter(n() >= 3)
 
 
-  # plot data
-  if (nrow(gg) < 20) {
-    p <- ggplot2::ggplot()
+  # Find idig polygon for each region
+  if (any(!is.na(idig)) && nrow(idig) > 3) {
+    idig_reg <- names(table(idig$region))
 
-    # add layer if idig data present
-    if (!is.na(idig) && nrow(idig) > 5) {
-      p <- p + ggplot2::stat_contour(
-        data = dc2, aes(x = X1, y = X2, z = value),
-        breaks = h, fill = "#FFFFBF",
-        col = "#FFFFBF", alpha = 0.7, lwd = 0.3, geom = "polygon"
-      ) 
-    }
+    idigs <- idig %>%
+      dplyr::filter(region %in% idig_reg) %>%
+      split(.$region)
 
-    p <- p +
-      ggplot2::geom_polygon(
-        data = world2, aes(x = long, y = lat, group = group),
-        col = "grey60", fill = "grey80", lwd = 0.3
-      ) +
-      ggplot2::geom_point(
-        data = gg, aes(x = lon, y = lat),
-        cex = 1.5, col = "grey10", alpha = 0.8
-      ) +
-      ggplot2::coord_map(ylim = c(50, 70), xlim = c(170, 230)) +
-      ggplot2::theme_bw() +
-      ggplot2::theme(
-        panel.grid.major = element_blank(),
-        axis.title = element_blank(),
-        axis.text = element_blank(),
-        axis.ticks = element_blank()
-      ) +
-      ggplot2::ggtitle(label = gg$species_name[1])
-  } else {
-    # kernal density estimator of dataset
-    kk <- MASS::kde2d(gg$lon, gg$lat,
-      lims = c(
-        c(min(gg$lon) - f, max(gg$lon) + f),
-        c(min(gg$lat) - f, max(gg$lat) + f)
-      )
-    )
-    dimnames(kk$z) <- list(kk$x, kk$y)
-    dc <- reshape::melt(kk$z)
+    # remove outliers by region
+    idigs <- lapply(idigs, remove_outliers)
 
-    # 5 contours
-    if (nrow(gg) > 500) {
-      perc <- seq(0.1, 0.99, length.out = 5)
-    } else {
-      if (nrow(gg) < 40) {
-        perc <- seq(0.05, 0.9, length.out = 5)
-      } else {
-        perc <- seq(0.05, 0.95, length.out = 5)
+    for (j in 1:length(idig_reg)) {
+      nd <- nrow(idigs[[j]])
+      if (nd > 5) {
+        ff <- case_when(
+          nd <= 200 & nd >= 40 ~ 15,
+          nd < 40 ~ 10,
+          nd > 200 ~ 20
+        )
+
+        out <- make_contours(idigs[[j]], ff = ff)
+        
+        assign(x = paste0("dd", j), value = out[[1]])
+        assign(x = paste0("h", j), value = out[[2]])
+        rm(f)
       }
     }
-
-    # get species contour boundaries at each percent
-    for (i in 1:length(perc)) {
-      out <- getLevel(gg$lon, gg$lat, perc[[i]])
-      assign(x = paste0("L", i), value = out)
-    }
-
-    # plotting data
-    p <- ggplot2::ggplot(data = dc, aes(x = X1, y = X2))
-
-    # add layer if idig data present
-    if (!is.na(idig) && nrow(idig) > 3) {
-      p <- p + ggplot2::stat_contour(
-        data = dc2, aes(z = value),
-        breaks = h, fill = "#FFFFBF",
-        col = "#FFFFBF", alpha = 0.7, lwd = 0.3, geom = "polygon"
-      )
-    }
-
-    p <- p +
-      ggplot2::stat_contour(aes(z = value),
-        breaks = L5, fill = "#FFFFBF",
-        col = "#FFFFBF", alpha = 0.7, lwd = 0.3, geom = "polygon"
-      ) +
-      ggplot2::stat_contour(aes(z = value),
-        breaks = L4, fill = "#FEE08B",
-        col = "#FEE08B", alpha = 0.7, lwd = 0.3, geom = "polygon"
-      ) +
-      ggplot2::stat_contour(aes(z = value),
-        breaks = L3, fill = "#FDAE61",
-        col = "#FDAE61", alpha = 0.7, lwd = 0.3, geom = "polygon"
-      ) +
-      ggplot2::stat_contour(aes(z = value),
-        breaks = L2, fill = "#F46D43",
-        col = "#F46D43", alpha = 0.7, lwd = 0.3, geom = "polygon"
-      ) +
-      ggplot2::stat_contour(aes(z = value),
-        breaks = L1, fill = "#D53E4F",
-        col = "#D53E4F", alpha = 0.7, lwd = 0.3, geom = "polygon"
-      ) +
-      #  ggplot2::geom_point(
-      #   data = gg, aes(x = lon, y = lat),
-      #   cex = 0.5, col = "blue", alpha = 0.4
-      # ) +
-      ggplot2::geom_polygon(
-        data = world2, aes(x = long, y = lat, group = group),
-        col = "grey60", fill = "grey80", lwd = 0.3
-      ) +
-      ggplot2::coord_map(ylim = c(50, 70), xlim = c(170, 230)) +
-      ggplot2::theme_bw() +
-      ggplot2::theme(
-        panel.grid.major = element_blank(),
-        axis.title = element_blank(),
-        axis.text = element_blank(),
-        axis.ticks = element_blank()
-      ) +
-      ggplot2::ggtitle(label = gg$species_name[[1]])
   }
+  
+  if (all(is.na(gg$lat)) && is.na(idig)) no_data <- TRUE else no_data <- FALSE
+
+
+  # Find GAP polygon for each region
+  if (!no_data & nrow(gg) > 20) {
+    s <- gg %>%
+      split(.$region)
+    regions <- names(s)
+
+    # remove outliers by region
+    s <- lapply(s, remove_outliers)
+
+    for (j in 1:length(regions)) {
+      if (nrow(s[[j]]) > 3) {
+        out <- make_contours(s[[j]], ff = 10)
+        assign(x = paste0("dc", j), value = out[[1]])
+        assign(x = paste0("L", j), value = out[[2]])
+      }
+    }
+  }
+
+
+
+  # plotting data
+  p <- ggplot2::ggplot()
+
+  # plot idig polygons for each region
+  if (any(!is.na(idig)) && nrow(idig) > 5) {
+    for (j in 1:length(idig_reg)) {
+      idigr <- idigs[[idig_reg[j]]]
+      da <- paste0("dd", j)
+      br <- paste0("h", j)
+      
+      if (nrow(idigr) > 5) {
+        p <- p + ggplot2::stat_contour(
+          data = eval(as.name(da)), aes(x = X1, y = X2, z = value),
+          breaks = eval(as.name(br)), fill = "#96c2db",
+          col = "#96c2db", lwd = 0.3, geom = "polygon"
+        )
+      } 
+      }
+    }
+  
+
+  # plot GAP polygons for each region
+  if (!no_data & nrow(gg) > 20) {
+    for (j in 1:length(regions)) {
+      gr <- s[[regions[j]]]
+
+      if (nrow(gr) > 5) {
+        if(regions[j] == "slope"){
+          p <- p + ggforce::geom_mark_hull(
+            data = gr, aes(x = lon, y = lat),
+            fill = "#1c62a5", col = NA, alpha = 1,
+            expand = 0.02)
+        } else {
+        da <- paste0("dc", j)
+        br <- paste0("L", j)
+        p <- p + ggplot2::stat_contour(
+          data = eval(as.name(da)), aes(x = X1, y = X2, z = value),
+          breaks = eval(as.name(br)), fill = "#1c62a5",
+          col = "#1c62a5", lwd = 0.3, geom = "polygon"
+        )
+        }
+      
+      } else {
+        p <- p + ggplot2::geom_point(
+          data = gr, aes(x = lon, y = lat),
+          cex = 4, col = "grey10", alpha = 0.8
+        )
+      }
+    }
+  }
+
+  # universal plotting aesthetics
+  p <- p +
+    ggplot2::geom_polygon(
+      data = world2, aes(x = long, y = lat, group = group),
+      col = "grey70", fill = "grey93", lwd = 0.3
+    )
+
+  # plot GAP data as points if too few obs for a polygon
+  if (!no_data && nrow(gg) < 20) {
+    p <- p +
+      ggplot2::geom_point(
+        data = gg, aes(x = lon, y = lat),
+        cex = 4, col = "grey10", alpha = 0.8
+      )
+  }
+
+  p <- p +
+    ggplot2::coord_map(ylim = c(50, 70), xlim = c(170, 230)) +
+    ggplot2::theme_bw() +
+    ggplot2::theme(
+      panel.grid.major = element_blank(),
+      axis.title = element_blank(),
+      axis.text = element_blank(),
+      axis.ticks = element_blank(),
+      plot.margin = unit(c(0, 0, 0, 0), "null"),
+      panel.margin = unit(c(0, 0, 0, 0), "null"),
+      axis.ticks.length = unit(0, "pt")
+    )
+  # ggplot2::ggtitle(label = gg$species_name[[1]])
+
 
 
   # create family-level folders for range map pdfs
-  if (!file.exists(paste0("output/", gg$family[1], "/"))) {
-    dir.create(paste0("output/", gg$family[1], "/"), recursive = TRUE)
+  if (!file.exists(paste0("output/", gg$tax_group[1], "/"))) {
+    dir.create(paste0("output/old_", gg$tax_group[1], "/"), recursive = TRUE)
   }
 
   if (save_output) {
-    pdf(paste0("output/", gg$family[1], "/", gg$species_name[1], ".pdf"))
-    print(p)
+    pdf(paste0("output/", gg$tax_group[1], "_old/", gg$species_name[1], ".pdf"))
+    print(p) 
     dev.off()
+    
+    x <- c(paste0(rep(c("dd", "dc", "h", "L"), each = 5), 1:5), "f", "s", "idigs", "idig", "gg")
+    rm(list = x)
   } else {
     print(p)
   }
 }
+
